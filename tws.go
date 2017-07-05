@@ -6,7 +6,6 @@ package tws
 // must be registered prior to inserting tasks into the scheduler queue.
 // Attempts to insert a task with an unregistered handler will fail with an
 // error.
-
 import (
 	"bytes"
 	"database/sql"
