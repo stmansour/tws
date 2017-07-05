@@ -36,11 +36,35 @@ type Item struct {
 	DtLastUpdate time.Time // last time we heard from the Worker() routine
 }
 
+// GridItem is grid display version of Item
+type GridItem struct {
+	TWSID         int64
+	Owner         string // caller identifier
+	OwnerData     string // data managed by the worker
+	WorkerName    string // the work function that will handle this work item
+	ActivateTime  string // when this time occurs or passes, this work item needs to be launched
+	RemainingTime string // duration from now til activation
+	Node          string // which node in the multi-node
+	FLAGS         uint64 // 1<<0 = worker called, 1<<1 = worker ack, 1<<2 rescheduled
+	DtActivated   string // when was this item last activated
+	DtCompleted   string // when did the work complete
+	DtCreate      string // when this item was created
+	DtLastUpdate  string // last time we heard from the Worker() routine
+	Recid         int64  `json:"recid"`
+}
+
 // All callback functions need to be registered so that we can survive a crash, restart, etc.
 
 type worker struct {
 	Name     string
 	Function func(*Item)
+}
+
+// TableGrid is a representation of the
+type TableGrid struct {
+	Status  string     `json:"status"`
+	Total   int64      `json:"total"`
+	Records []GridItem `json:"records"`
 }
 
 var registry = map[string]worker{}
@@ -53,12 +77,14 @@ type PreparedStatements struct {
 	UpdateItem *sql.Stmt
 	DeleteItem *sql.Stmt
 	FindItem   *sql.Stmt
+	GetAll     *sql.Stmt
 }
 
 // TWSctx is a context struct for this package
 var TWSctx struct {
 	Db       *sql.DB            // db with TWS table
 	DBdir    *sql.DB            // directory database
+	Zone     *time.Location     // timezone for printing
 	Node     string             // unique identifying string for this running instance
 	Prepstmt PreparedStatements // sql statements needed by this package
 }
@@ -82,6 +108,7 @@ func Init(db, dir *sql.DB) {
 		e := fmt.Errorf("FATAL error with CreatePreparedStatements: %s", err.Error())
 		log.Fatalf("%s\n", e.Error())
 	}
+	TWSctx.Zone = time.Local
 	go Scheduler()
 }
 
@@ -106,6 +133,10 @@ func CreatePreparedStatements() error {
 		return err
 	}
 	TWSctx.Prepstmt.Ready, err = TWSctx.Db.Prepare("SELECT " + flds + " FROM TWS WHERE Node=? AND ActivateTime <= ?")
+	if err != nil {
+		return err
+	}
+	TWSctx.Prepstmt.GetAll, err = TWSctx.Db.Prepare("SELECT " + flds + " FROM TWS ORDER BY ActivateTime DESC LIMIT ? OFFSET ?")
 	if err != nil {
 		return err
 	}
@@ -159,6 +190,51 @@ func UpdateItem(a *Item) error {
 	return err
 }
 
+func readTWSItems(rows *sql.Rows, a *Item) {
+	rows.Scan(&a.TWSID, &a.Owner, &a.OwnerData, &a.WorkerName, &a.ActivateTime, &a.Node, &a.FLAGS, &a.DtActivated, &a.DtCompleted, &a.DtCreate, &a.DtLastUpdate)
+}
+
+// WSGridData returns a version of the TWS table that is suitable for putting
+// into a w2ui grid.
+func WSGridData(limit, offset int) (TableGrid, error) {
+	var m TableGrid
+	WSGridTimeFmt := "15:04:05 MST  Jan _2, 2006"
+	rows, err := TWSctx.Prepstmt.GetAll.Query(limit, offset)
+	if err != nil {
+		return m, err
+	}
+	defer rows.Close()
+	now := time.Now()
+	for rows.Next() {
+		var a Item
+		readTWSItems(rows, &a)
+		remaining := "past"
+		if a.ActivateTime.After(now) {
+			dur := a.ActivateTime.Sub(now)
+			remaining = dur.String()
+		}
+		var b = GridItem{
+			TWSID:         a.TWSID,
+			Owner:         a.Owner,
+			OwnerData:     a.OwnerData,
+			WorkerName:    a.WorkerName,
+			ActivateTime:  a.ActivateTime.In(TWSctx.Zone).Format(WSGridTimeFmt),
+			RemainingTime: remaining,
+			Node:          a.Node,
+			FLAGS:         a.FLAGS,
+			DtActivated:   a.DtActivated.In(TWSctx.Zone).Format(WSGridTimeFmt),
+			DtCompleted:   a.DtCompleted.In(TWSctx.Zone).Format(WSGridTimeFmt),
+			DtCreate:      a.DtCreate.In(TWSctx.Zone).Format(WSGridTimeFmt),
+			DtLastUpdate:  a.DtLastUpdate.In(TWSctx.Zone).Format(WSGridTimeFmt),
+			Recid:         a.TWSID,
+		}
+		m.Records = append(m.Records, b)
+	}
+	m.Total = int64(len(m.Records))
+	m.Status = "success "
+	return m, nil
+}
+
 // ItemWorking marks that this item is working.
 func ItemWorking(a *Item) error {
 	a.FLAGS &= ^(uint64(1 << 2)) // zero out bit 2, the caller just started on this. It is no longer rescheduled
@@ -190,7 +266,7 @@ func FindItem(o string) ([]Item, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var a Item
-		rows.Scan(&a.TWSID, &a.Owner, &a.OwnerData, &a.WorkerName, &a.ActivateTime, &a.Node, &a.FLAGS, &a.DtActivated, &a.DtCompleted, &a.DtCreate, &a.DtLastUpdate)
+		readTWSItems(rows, &a)
 		m = append(m, a)
 	}
 	return m, nil
@@ -213,11 +289,14 @@ func LaunchTimedWork() error {
 	now := time.Now()
 	for rows.Next() {
 		var a Item
-		rows.Scan(&a.TWSID, &a.Owner, &a.OwnerData, &a.WorkerName, &a.ActivateTime, &a.Node, &a.FLAGS, &a.DtActivated, &a.DtCompleted, &a.DtCreate, &a.DtLastUpdate)
+		readTWSItems(rows, &a)
 		if now.After(a.ActivateTime) {
 			a.DtActivated = time.Now()
 			a.DtCompleted = time.Date(0, 0, 0, 0, 0, 0, 0, time.UTC)
 			UpdateItem(&a)
+			if nil == registry[a.WorkerName].Function {
+				continue
+			}
 			go registry[a.WorkerName].Function(&a)
 		}
 	}
@@ -231,7 +310,6 @@ func Scheduler() {
 	for {
 		select {
 		case <-time.After(chkTime):
-			fmt.Printf("Schedular check time\n")
 			LaunchTimedWork()
 		}
 	}
