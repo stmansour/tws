@@ -161,13 +161,15 @@ func UpdateItem(a *Item) error {
 
 // ItemWorking marks that this item is working.
 func ItemWorking(a *Item) error {
-	a.FLAGS |= 1 << 0
+	a.FLAGS &= ^(uint64(1 << 2)) // zero out bit 2, the caller just started on this. It is no longer rescheduled
+	a.FLAGS |= 3                 // worker acknowledged receipt
 	return UpdateItem(a)
 }
 
 // RescheduleItem marks this item as rescheduled for the supplied time
 func RescheduleItem(a *Item, t time.Time) error {
 	a.FLAGS &= 0xfffffffffffffffc // active=0, worker ack=0, rescheduled=1
+	a.FLAGS |= 4                  // set the rescheduled flag
 	a.ActivateTime = t
 	a.DtCompleted = time.Now()
 	return UpdateItem(a)
