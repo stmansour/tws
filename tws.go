@@ -290,7 +290,9 @@ func LaunchTimedWork() error {
 	for rows.Next() {
 		var a Item
 		readTWSItems(rows, &a)
+		// fmt.Printf("read item: WorkerName = %s, activate: %s\n", a.WorkerName, a.ActivateTime.Format("Jan 2, 2006 3:04pm MST"))
 		if now.After(a.ActivateTime) {
+			// fmt.Printf("activated: %s\n", a.WorkerName)
 			a.DtActivated = time.Now()
 			a.DtCompleted = time.Date(0, 0, 0, 0, 0, 0, 0, time.UTC)
 			UpdateItem(&a)
