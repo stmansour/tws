@@ -6,6 +6,13 @@ package tws
 // must be registered prior to inserting tasks into the scheduler queue.
 // Attempts to insert a task with an unregistered handler will fail with an
 // error.
+
+// Usage:
+//    The execution loop checks the TWS table 10 seconds. Any record with an
+//    activation time that is prior to "now" is executed. That is, the
+//    function associated with the record's WorkerName field is called. The
+//    single parameter to this call is the tws.Item struct.
+
 import (
 	"bytes"
 	"database/sql"
@@ -78,6 +85,7 @@ type PreparedStatements struct {
 	DeleteItem *sql.Stmt
 	FindItem   *sql.Stmt
 	GetAll     *sql.Stmt
+	Cleanup    *sql.Stmt
 }
 
 // TWSctx is a context struct for this package
@@ -153,6 +161,10 @@ func CreatePreparedStatements() error {
 		return err
 	}
 	TWSctx.Prepstmt.DeleteItem, err = TWSctx.Db.Prepare("DELETE from TWS WHERE TWSID=?")
+	if err != nil {
+		return err
+	}
+	TWSctx.Prepstmt.Cleanup, err = TWSctx.Db.Prepare("DELETE from TWS WHERE ActivateTime < ?")
 	if err != nil {
 		return err
 	}
@@ -305,6 +317,21 @@ func LaunchTimedWork() error {
 	return nil
 }
 
+// CleanupOldRecords cleans out records more than a month old.
+// sman 3/22/2019 - if the Activate time is more than 32 days past
+// then remove the record.  This is a cleanup that I believe will
+// help with old stuff
+//---------------------------------------------------------------------
+func cleanupOldRecords() error {
+	t := time.Now().Add(time.Duration(-32*24) * time.Hour)
+	// fmt.Printf("Entered: cleanupOldRecords.  clearing records older than: %s\n", t.Format("1/2/2006"))
+	_, err := TWSctx.Prepstmt.Cleanup.Exec(t)
+	if err != nil {
+		log.Print(err.Error())
+	}
+	return err
+}
+
 // Scheduler is the main go routine for this system. It
 func Scheduler() {
 	numSecs := time.Duration(10)
@@ -313,6 +340,7 @@ func Scheduler() {
 		select {
 		case <-time.After(chkTime):
 			LaunchTimedWork()
+			cleanupOldRecords()
 		}
 	}
 }
